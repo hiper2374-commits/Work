@@ -1,0 +1,1033 @@
+ <!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>Пиксельный Кот — реалистичный прототип</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: radial-gradient(circle at 50% 30%, #2a2a4a, #0d0d1a 80%);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    font-family: 'Courier New', monospace;
+    color: #eee;
+    overflow: hidden;
+  }
+  h1 {
+    font-size: 18px; margin-bottom: 6px; color: #ffd166;
+    letter-spacing: 3px; text-shadow: 0 0 10px rgba(255,209,102,0.5);
+  }
+  #hud {
+    display: flex; gap: 24px; margin-bottom: 6px; font-size: 15px;
+    background: rgba(0,0,0,0.4); padding: 6px 18px; border-radius: 20px;
+    border: 1px solid rgba(255,209,102,0.3);
+  }
+  #hud span { color: #ffd166; font-weight: bold; }
+  #hud .heart { color: #ff5c7a; }
+  canvas {
+    border: 3px solid #ffd166;
+    border-radius: 6px;
+    image-rendering: pixelated;
+    box-shadow: 0 0 40px rgba(255,209,102,0.2), 0 10px 30px rgba(0,0,0,0.6);
+    background: #000;
+  }
+  #controls {
+    margin-top: 8px; font-size: 12px; color: #888; text-align: center;
+    max-width: 800px; line-height: 1.5;
+  }
+  #controls b { color: #ffd166; }
+  #overlay {
+    position: fixed; inset: 0; display: none;
+    align-items: center; justify-content: center;
+    background: rgba(0,0,0,0.75); z-index: 10; backdrop-filter: blur(4px);
+  }
+  #overlay.show { display: flex; }
+  #overlay .panel {
+    background: linear-gradient(160deg, #1e1e3a, #141428);
+    border: 2px solid #ffd166; border-radius: 16px;
+    padding: 32px 48px; text-align: center;
+    box-shadow: 0 0 60px rgba(255,209,102,0.3);
+  }
+  #overlay h2 { color: #ffd166; font-size: 28px; margin-bottom: 12px; }
+  #overlay p { color: #ccc; margin-bottom: 20px; font-size: 14px; }
+  #overlay button {
+    background: #ffd166; color: #1a1a2e; border: none;
+    padding: 12px 32px; font-size: 16px; font-weight: bold;
+    border-radius: 8px; cursor: pointer; font-family: inherit;
+    transition: transform 0.1s;
+  }
+  #overlay button:hover { transform: scale(1.05); }
+</style>
+</head>
+<body>
+
+<h1>🐱 ПИКСЕЛЬНЫЙ КОТ 🐱</h1>
+<div id="hud">
+  <div>Жизни: <span id="lives" class="heart">❤❤❤</span></div>
+  <div>Очки: <span id="score">0</span></div>
+  <div>Уровень: <span id="level">1/5</span></div>
+</div>
+<canvas id="game" width="800" height="450"></canvas>
+<div id="controls">
+  <b>← →</b> или <b>A/D</b> — движение &nbsp;•&nbsp; <b>Пробел / ↑ / W</b> — прыжок (двойной в воздухе) &nbsp;•&nbsp; <b>R</b> — заново
+</div>
+
+<div id="overlay"><div class="panel">
+  <h2 id="ovTitle">Готов?</h2>
+  <p id="ovText">Помоги коту Барсику добраться домой через 5 локаций!</p>
+  <button id="ovBtn">Играть</button>
+</div></div>
+
+<script>
+// ================== ИНИЦИАЛИЗАЦИЯ ==================
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+const overlay = document.getElementById('overlay');
+const ovTitle = document.getElementById('ovTitle');
+const ovText  = document.getElementById('ovText');
+const ovBtn   = document.getElementById('ovBtn');
+
+// ================== КОНСТАНТЫ ==================
+const GRAVITY = 0.55;
+const MOVE_SPEED = 4.2;
+const ACCEL = 0.8;
+const FRICTION = 0.75;
+const JUMP_POWER = -11.5;
+const MAX_FALL = 14;
+const COYOTE_TIME = 8;      // кадров после схода с платформы можно прыгать
+const JUMP_BUFFER = 8;      // кадров прыжок «запоминается»
+
+// ================== ЗВУК (Web Audio) ==================
+let audioCtx = null;
+function initAudio() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+}
+function beep(freq, dur, type = 'square', vol = 0.05) {
+  if (!audioCtx) return;
+  const o = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  o.type = type; o.frequency.value = freq;
+  g.gain.setValueAtTime(vol, audioCtx.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
+  o.connect(g); g.connect(audioCtx.destination);
+  o.start(); o.stop(audioCtx.currentTime + dur);
+}
+const sfx = {
+  jump:  () => beep(520, 0.12, 'square', 0.04),
+  dbl:   () => beep(720, 0.12, 'square', 0.04),
+  coin:  () => { beep(880, 0.08, 'sine', 0.05); setTimeout(()=>beep(1320,0.1,'sine',0.05),60); },
+  hurt:  () => { beep(200, 0.2, 'sawtooth', 0.06); setTimeout(()=>beep(120,0.25,'sawtooth',0.06),80); },
+  win:   () => { [523,659,784,1047].forEach((f,i)=>setTimeout(()=>beep(f,0.15,'sine',0.06),i*100)); },
+  lose:  () => { [400,300,200,100].forEach((f,i)=>setTimeout(()=>beep(f,0.2,'sawtooth',0.06),i*150)); },
+};
+
+// ================== УРОВНИ ==================
+const levels = [
+  {
+    name: 'Двор', bgTop: '#87ceeb', bgBot: '#b8e0f0', tint: '#87ceeb',
+    spawn: { x: 40, y: 340 },
+    platforms: [
+      { x: 0, y: 410, w: 800, h: 40, style: 'ground' },
+      { x: 180, y: 340, w: 100, h: 16, style: 'wood' },
+      { x: 360, y: 270, w: 110, h: 16, style: 'wood' },
+      { x: 560, y: 340, w: 120, h: 16, style: 'wood' },
+      { x: 700, y: 250, w: 90, h: 16, style: 'wood' },
+    ],
+    enemies: [
+      { x: 300, y: 386, w: 28, h: 24, minX: 200, maxX: 540, dir: 1, type: 'dog' },
+    ],
+    items: [
+      { x: 220, y: 305, type: 'fish' },
+      { x: 400, y: 235, type: 'milk' },
+      { x: 600, y: 305, type: 'fish' },
+    ],
+    finish: { x: 740, y: 200, w: 30, h: 50 },
+  },
+  {
+    name: 'Крыши', bgTop: '#ffb86b', bgBot: '#ff7e5f', tint: '#ffb86b',
+    spawn: { x: 30, y: 350 },
+    platforms: [
+      { x: 0, y: 410, w: 180, h: 40, style: 'ground' },
+      { x: 240, y: 360, w: 90, h: 16, style: 'brick' },
+      { x: 390, y: 300, w: 90, h: 16, style: 'brick' },
+      { x: 540, y: 240, w: 90, h: 16, style: 'brick' },
+      { x: 690, y: 300, w: 110, h: 16, style: 'brick' },
+      { x: 690, y: 410, w: 110, h: 40, style: 'ground' },
+    ],
+    enemies: [
+      { x: 250, y: 336, w: 20, h: 20, minX: 240, maxX: 320, dir: 1, type: 'bee' },
+      { x: 550, y: 216, w: 20, h: 20, minX: 540, maxX: 620, dir: 1, type: 'bee' },
+    ],
+    items: [
+      { x: 280, y: 325, type: 'milk' },
+      { x: 430, y: 265, type: 'fish' },
+      { x: 580, y: 205, type: 'milk' },
+    ],
+    finish: { x: 740, y: 250, w: 30, h: 50 },
+  },
+  {
+    name: 'Парк', bgTop: '#6ec17a', bgBot: '#3d8b4f', tint: '#6ec17a',
+    spawn: { x: 30, y: 350 },
+    platforms: [
+      { x: 0, y: 410, w: 250, h: 40, style: 'ground' },
+      { x: 300, y: 360, w: 80, h: 16, style: 'grass', moving: true, dx: 1.2, range: 70 },
+      { x: 450, y: 300, w: 80, h: 16, style: 'grass' },
+      { x: 600, y: 360, w: 80, h: 16, style: 'grass', moving: true, dx: -1.2, range: 70 },
+      { x: 400, y: 200, w: 100, h: 16, style: 'grass' },
+      { x: 700, y: 410, w: 100, h: 40, style: 'ground' },
+    ],
+    enemies: [
+      { x: 100, y: 386, w: 28, h: 24, minX: 20, maxX: 230, dir: 1, type: 'dog' },
+      { x: 470, y: 276, w: 28, h: 24, minX: 450, maxX: 510, dir: 1, type: 'dog' },
+    ],
+    items: [
+      { x: 340, y: 325, type: 'fish' },
+      { x: 440, y: 165, type: 'milk' },
+      { x: 640, y: 325, type: 'fish' },
+    ],
+    finish: { x: 730, y: 360, w: 30, h: 50 },
+  },
+  {
+    name: 'Метро', bgTop: '#3a3a5a', bgBot: '#1a1a2e', tint: '#5a5a8a',
+    spawn: { x: 30, y: 350 },
+    platforms: [
+      { x: 0, y: 410, w: 200, h: 40, style: 'stone' },
+      { x: 260, y: 360, w: 80, h: 16, style: 'stone' },
+      { x: 400, y: 300, w: 80, h: 16, style: 'stone', moving: true, dx: 1.5, range: 90 },
+      { x: 560, y: 360, w: 80, h: 16, style: 'stone' },
+      { x: 700, y: 410, w: 100, h: 40, style: 'stone' },
+      { x: 340, y: 200, w: 100, h: 16, style: 'stone' },
+    ],
+    enemies: [
+      { x: 280, y: 336, w: 28, h: 24, minX: 260, maxX: 340, dir: 1, type: 'dog' },
+      { x: 580, y: 336, w: 20, h: 20, minX: 560, maxX: 640, dir: 1, type: 'bee' },
+      { x: 360, y: 176, w: 28, h: 24, minX: 340, maxX: 440, dir: 1, type: 'dog' },
+    ],
+    items: [
+      { x: 300, y: 325, type: 'milk' },
+      { x: 430, y: 265, type: 'fish' },
+      { x: 380, y: 165, type: 'milk' },
+    ],
+    finish: { x: 740, y: 360, w: 30, h: 50 },
+  },
+  {
+    name: 'Лес', bgTop: '#2d5a3d', bgBot: '#0d2a1a', tint: '#2d5a3d',
+    spawn: { x: 30, y: 350 },
+    platforms: [
+      { x: 0, y: 410, w: 160, h: 40, style: 'ground' },
+      { x: 220, y: 350, w: 70, h: 16, style: 'wood' },
+      { x: 340, y: 290, w: 70, h: 16, style: 'wood' },
+      { x: 460, y: 230, w: 70, h: 16, style: 'wood' },
+      { x: 580, y: 290, w: 70, h: 16, style: 'wood' },
+      { x: 700, y: 350, w: 100, h: 16, style: 'wood' },
+      { x: 700, y: 410, w: 100, h: 40, style: 'ground' },
+    ],
+    enemies: [
+      { x: 240, y: 326, w: 20, h: 20, minX: 220, maxX: 290, dir: 1, type: 'bee' },
+      { x: 480, y: 206, w: 28, h: 24, minX: 460, maxX: 530, dir: 1, type: 'dog' },
+      { x: 600, y: 266, w: 20, h: 20, minX: 580, maxX: 650, dir: 1, type: 'bee' },
+    ],
+    items: [
+      { x: 250, y: 315, type: 'fish' },
+      { x: 380, y: 255, type: 'milk' },
+      { x: 500, y: 195, type: 'milk' },
+      { x: 620, y: 255, type: 'fish' },
+    ],
+    finish: { x: 740, y: 300, w: 30, h: 50 },
+  },
+];
+
+// ================== СОСТОЯНИЕ ==================
+let state = 'menu'; // menu | playing | transition | dead | won
+let lives = 3, score = 0, currentLevel = 0;
+let level, platforms, enemies, items, finish;
+let particles = [];
+let screenShake = 0;
+let camera = { x: 0 };
+let time = 0;
+let coyoteTimer = 0;
+let jumpBufferTimer = 0;
+
+const player = {
+  x: 0, y: 0, w: 26, h: 26,
+  vx: 0, vy: 0,
+  onGround: false,
+  jumps: 0,
+  facing: 1,
+  invuln: 0,
+  animFrame: 0,
+  animTimer: 0,
+  squash: 1,   // для анимации приземления
+};
+
+const keys = {};
+window.addEventListener('keydown', e => {
+  if (['ArrowLeft','ArrowRight','ArrowUp','ArrowDown',' '].includes(e.key)) e.preventDefault();
+  keys[e.key.toLowerCase()] = true;
+  if (e.key === ' ') { keys['space'] = true; jumpBufferTimer = JUMP_BUFFER; }
+  if (e.key.toLowerCase() === 'r') { if (state !== 'menu') restart(); }
+});
+window.addEventListener('keyup', e => {
+  keys[e.key.toLowerCase()] = false;
+  if (e.key === ' ') keys['space'] = false;
+});
+
+// ================== ЗАГРУЗКА УРОВНЯ ==================
+function loadLevel(idx) {
+  currentLevel = idx;
+  level = JSON.parse(JSON.stringify(levels[idx]));
+  platforms = level.platforms.map(p => ({...p, baseX: p.x, baseY: p.y, t: 0}));
+  enemies = level.enemies.map(e => ({...e, t: Math.random() * 10}));
+  items = level.items.map(i => ({...i, taken: false, bob: Math.random() * 6}));
+  finish = {...level.finish};
+  player.x = level.spawn.x;
+  player.y = level.spawn.y;
+  player.vx = 0; player.vy = 0;
+  player.jumps = 0;
+  player.invuln = 0;
+  player.squash = 1;
+  coyoteTimer = 0;
+  jumpBufferTimer = 0;
+  state = 'playing';
+  updateHUD();
+}
+
+function restart() {
+  lives = 3; score = 0;
+  loadLevel(0);
+}
+
+function updateHUD() {
+  document.getElementById('lives').textContent = '❤'.repeat(Math.max(0, lives)) || '—';
+  document.getElementById('score').textContent = score;
+  document.getElementById('level').textContent = `${currentLevel + 1}/${levels.length}`;
+}
+
+// ================== УТИЛИТЫ ==================
+function rectsOverlap(a, b) {
+  return a.x < b.x + b.w && a.x + a.w > b.x &&
+         a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+// ================== ФИЗИКА ИГРОКА ==================
+function updatePlayer() {
+  // Горизонтальное движение с ускорением и трением
+  let move = 0;
+  if (keys['arrowleft'] || keys['a'] || keys['ф']) move -= 1;
+  if (keys['arrowright'] || keys['d'] || keys['в']) move += 1;
+
+  if (move !== 0) {
+    player.vx += move * ACCEL;
+    player.vx = Math.max(-MOVE_SPEED, Math.min(MOVE_SPEED, player.vx));
+    player.facing = move;
+    player.animTimer++;
+  } else {
+    player.vx *= FRICTION;
+    if (Math.abs(player.vx) < 0.1) player.vx = 0;
+  }
+
+  // Таймер coyote time
+  if (player.onGround) coyoteTimer = COYOTE_TIME;
+  else if (coyoteTimer > 0) coyoteTimer--;
+
+  // Прыжок (с jump buffer)
+  if (jumpBufferTimer > 0) {
+    if (coyoteTimer > 0 && player.jumps === 0) {
+      player.vy = JUMP_POWER;
+      player.jumps = 1;
+      player.onGround = false;
+      coyoteTimer = 0;
+      jumpBufferTimer = 0;
+      player.squash = 0.7;
+      sfx.jump();
+      spawnDust(player.x + player.w/2, player.y + player.h, 6);
+    } else if (player.jumps < 2 && !player.onGround) {
+      player.vy = JUMP_POWER * 0.9;
+      player.jumps++;
+      jumpBufferTimer = 0;
+      player.squash = 0.7;
+      sfx.dbl();
+      spawnRing(player.x + player.w/2, player.y + player.h);
+    }
+  }
+  if (jumpBufferTimer > 0) jumpBufferTimer--;
+
+  // Короткий прыжок при отпускании
+  const jumpHeld = keys['space'] || keys['arrowup'] || keys['w'] || keys['ц'];
+  if (!jumpHeld && player.vy < -4) player.vy *= 0.85;
+
+  // Гравитация
+  player.vy += GRAVITY;
+  if (player.vy > MAX_FALL) player.vy = MAX_FALL;
+
+  // X
+  player.x += player.vx;
+  player.x = Math.max(0, Math.min(W - player.w, player.x));
+
+  // Y + коллизии
+  const wasOnGround = player.onGround;
+  player.onGround = false;
+  player.y += player.vy;
+
+  for (const p of platforms) {
+    if (!rectsOverlap(player, p)) continue;
+    if (player.vy > 0 && player.y + player.h - player.vy <= p.y + 2) {
+      player.y = p.y - player.h;
+      if (player.vy > 6) {
+        player.squash = 1.4;
+        spawnDust(player.x + player.w/2, player.y + player.h, 4);
+      }
+      player.vy = 0;
+      player.onGround = true;
+      player.jumps = 0;
+    } else if (player.vy < 0 && player.y - player.vy >= p.y + p.h - 2) {
+      player.y = p.y + p.h;
+      player.vy = 0;
+    }
+  }
+  if (player.onGround && !wasOnGround) sfx.jump && beep(180, 0.06, 'sine', 0.03);
+
+  // Плавная squash-анимация
+  player.squash += (1 - player.squash) * 0.15;
+
+  // Падение
+  if (player.y > H + 100) die();
+}
+
+// ================== ВРАГИ ==================
+function updateEnemies() {
+  for (const e of enemies) {
+    if (e.type === 'dog') {
+      e.x += e.dir * 1.3;
+      if (e.x <= e.minX) { e.x = e.minX; e.dir = 1; }
+      if (e.x + e.w >= e.maxX) { e.x = e.maxX - e.w; e.dir = -1; }
+      e.t += 0.15;
+    } else if (e.type === 'bee') {
+      e.x += e.dir * 1.6;
+      if (e.x <= e.minX) { e.x = e.minX; e.dir = 1; }
+      if (e.x + e.w >= e.maxX) { e.x = e.maxX - e.w; e.dir = -1; }
+      e.t += 0.18;
+      if (e.baseY === undefined) e.baseY = e.y;
+      e.y = e.baseY + Math.sin(e.t) * 14;
+    }
+    if (player.invuln <= 0 && rectsOverlap(player, e)) die();
+  }
+}
+
+// ================== ПРЕДМЕТЫ ==================
+function updateItems() {
+  for (const it of items) {
+    if (it.taken) continue;
+    it.bob += 0.12;
+    const box = {x: it.x, y: it.y + Math.sin(it.bob) * 3, w: 22, h: 22};
+    if (rectsOverlap(player, box)) {
+      it.taken = true;
+      if (it.type === 'fish') {
+        if (lives < 3) lives++;
+        score += 10;
+        spawnParticles(it.x + 11, it.y + 11, '#4fc3f7', 14);
+      } else {
+        score += 25;
+        spawnParticles(it.x + 11, it.y + 11, '#ffffff', 14);
+      }
+      sfx.coin();
+      updateHUD();
+    }
+  }
+}
+
+// ================== ФИНИШ ==================
+function checkFinish() {
+  if (rectsOverlap(player, finish) && state === 'playing') {
+    score += 100;
+    updateHUD();
+    if (currentLevel < levels.length - 1) {
+      state = 'transition';
+      showOverlay('Уровень пройден!', `«${levels[currentLevel].name}» — впереди новый!`, 'Далее', () => {
+        loadLevel(currentLevel + 1);
+        overlay.classList.remove('show');
+      });
+    } else {
+      state = 'won';
+      sfx.win();
+      showOverlay('🎉 ПОБЕДА! 🎉', `Кот Барсик дома! Очки: ${score}`, 'Играть снова', () => {
+        overlay.classList.remove('show');
+        restart();
+      });
+    }
+  }
+}
+
+// ================== СМЕРТЬ ==================
+function die() {
+  if (state !== 'playing' || player.invuln > 0) return;
+  lives--;
+  updateHUD();
+  screenShake = 20;
+  sfx.hurt();
+  spawnParticles(player.x + player.w/2, player.y + player.h/2, '#ff5c7a', 25);
+  if (lives <= 0) {
+    state = 'dead';
+    sfx.lose();
+    showOverlay('💀 Игра окончена', `Ты набрал ${score} очков. Попробуешь ещё?`, 'Заново', () => {
+      overlay.classList.remove('show');
+      restart();
+    });
+  } else {
+    player.invuln = 100;
+    player.x = level.spawn.x;
+    player.y = level.spawn.y;
+    player.vx = 0; player.vy = 0;
+    player.jumps = 0;
+  }
+}
+
+// ================== ОВЕРЛЕЙ ==================
+function showOverlay(title, text, btn, cb) {
+  ovTitle.textContent = title;
+  ovText.textContent = text;
+  ovBtn.textContent = btn;
+  ovBtn.onclick = cb;
+  overlay.classList.add('show');
+}
+
+// ================== ЧАСТИЦЫ ==================
+function spawnParticles(x, y, color, count) {
+  for (let i = 0; i < count; i++) {
+    particles.push({
+      x, y,
+      vx: (Math.random() - 0.5) * 7,
+      vy: (Math.random() - 0.5) * 7 - 2,
+      life: 40, maxLife: 40,
+      color, size: 2 + Math.random() * 3,
+      grav: 0.25,
+    });
+  }
+}
+function spawnDust(x, y, count) {
+  for (let i = 0; i < count; i++) {
+    particles.push({
+      x: x + (Math.random() - 0.5) * 20, y,
+      vx: (Math.random() - 0.5) * 3,
+      vy: -Math.random() * 2,
+      life: 25, maxLife: 25,
+      color: '#d4c4a8', size: 2 + Math.random() * 3,
+      grav: 0.05,
+    });
+  }
+}
+function spawnRing(x, y) {
+  for (let i = 0; i < 12; i++) {
+    const a = (i / 12) * Math.PI * 2;
+    particles.push({
+      x, y,
+      vx: Math.cos(a) * 3, vy: Math.sin(a) * 3,
+      life: 20, maxLife: 20,
+      color: '#ffffff', size: 3, grav: 0,
+    });
+  }
+}
+function updateParticles() {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx; p.y += p.vy;
+    p.vy += p.grav;
+    p.vx *= 0.98;
+    p.life--;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+}
+
+// ================== РИСОВАНИЕ ==================
+function drawBackground() {
+  // градиент неба
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, level.bgTop);
+  grad.addColorStop(1, level.bgBot);
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+
+  // параллакс-облака/деревья
+  ctx.save();
+  const px = camera.x * 0.3;
+  if (currentLevel === 2 || currentLevel === 4) {
+    // деревья для парка/леса
+    for (let i = 0; i < 8; i++) {
+      const tx = ((i * 180 - px) % (W + 400)) + 100;
+      const th = 120 + (i % 3) * 30;
+      ctx.fillStyle = currentLevel === 2 ? '#2d6a3f' : '#1a4a2a';
+      ctx.fillRect(tx - 6, H - th - 40, 12, th);
+      ctx.beginPath();
+      ctx.arc(tx, H - th - 40, 40 + (i % 3) * 10, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  } else if (currentLevel === 1) {
+    // дома для крыш
+    for (let i = 0; i < 6; i++) {
+      const tx = ((i * 160 - px) % (W + 300)) + 80;
+      const th = 100 + (i % 4) * 40;
+      ctx.fillStyle = 'rgba(60,40,80,0.5)';
+      ctx.fillRect(tx, H - th - 40, 90, th);
+    }
+  } else if (currentLevel === 3) {
+    // туннель метро
+    ctx.fillStyle = 'rgba(0,0,0,0.3)';
+    for (let i = 0; i < 5; i++) {
+      const tx = ((i * 220 - px) % (W + 400)) + 60;
+      ctx.beginPath();
+      ctx.arc(tx, H - 100, 70, Math.PI, 0);
+      ctx.fill();
+    }
+  }
+
+  // облака
+  ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  for (let i = 0; i < 5; i++) {
+    const cx = ((i * 200 - camera.x * 0.15 + time * 0.2) % (W + 200)) - 100;
+    const cy = 40 + (i % 3) * 40;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 22, 0, Math.PI * 2);
+    ctx.arc(cx + 24, cy, 30, 0, Math.PI * 2);
+    ctx.arc(cx + 52, cy, 22, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawPlatform(p) {
+  // тень под платформой
+  ctx.fillStyle = 'rgba(0,0,0,0.15)';
+  ctx.fillRect(p.x + 3, p.y + p.h, p.w - 6, 4);
+
+  if (p.style === 'ground') {
+    ctx.fillStyle = '#8b5a2b';
+    ctx.fillRect(p.x, p.y, p.w, p.h);
+    // текстура земли
+    ctx.fillStyle = '#6b451f';
+    for (let i = 0; i < p.w; i += 20) {
+      ctx.fillRect(p.x + i + (i % 40 === 0 ? 4 : 0), p.y + 10 + (i % 30), 4, 4);
+    }
+    ctx.fillStyle = '#5fa85f';
+    ctx.fillRect(p.x, p.y, p.w, 6);
+    ctx.fillStyle = '#4a8a4a';
+    for (let i = 0; i < p.w; i += 12) {
+      ctx.fillRect(p.x + i, p.y + 4, 6, 2);
+    }
+  } else if (p.style === 'wood') {
+    ctx.fillStyle = '#a0673a';
+    ctx.fillRect(p.x, p.y, p.w, p.h);
+    ctx.fillStyle = '#7a4d2a';
+    for (let i = 0; i < p.w; i += 16) {
+      ctx.fillRect(p.x + i, p.y, 2, p.h);
+    }
+    ctx.fillStyle = '#c78a5a';
+    ctx.fillRect(p.x, p.y, p.w, 3);
+  } else if (p.style === 'brick') {
+    ctx.fillStyle = '#a04030';
+    ctx.fillRect(p.x, p.y, p.w, p.h);
+    ctx.strokeStyle = '#6a2018';
+    ctx.lineWidth = 1;
+    for (let i = 0; i < p.w; i += 20) {
+      ctx.strokeRect(p.x + i, p.y, 20, p.h / 2);
+      ctx.strokeRect(p.x + i + 10, p.y + p.h / 2, 20, p.h / 2);
+    }
+  } else if (p.style === 'grass') {
+    ctx.fillStyle = '#6b451f';
+    ctx.fillRect(p.x, p.y, p.w, p.h);
+    ctx.fillStyle = '#4a9a4a';
+    ctx.fillRect(p.x, p.y, p.w, 5);
+    ctx.fillStyle = '#5fb85f';
+    for (let i = 0; i < p.w; i += 6) {
+      ctx.fillRect(p.x + i, p.y - 3, 3, 4);
+    }
+  } else if (p.style === 'stone') {
+    ctx.fillStyle = '#5a5a6a';
+    ctx.fillRect(p.x, p.y, p.w, p.h);
+    ctx.fillStyle = '#40404a';
+    for (let i = 0; i < p.w; i += 24) {
+      ctx.fillRect(p.x + i, p.y + 2, 22, p.h - 4);
+    }
+  }
+}
+
+function drawPlatforms() {
+  for (const p of platforms) drawPlatform(p);
+}
+
+function drawPlayer() {
+  if (player.invuln > 0 && Math.floor(player.invuln / 5) % 2 === 0) return;
+
+  const {x, y, w, h} = player;
+  const sq = player.squash;
+  const drawW = w * (2 - sq);
+  const drawH = h * sq;
+  const drawX = x + (w - drawW) / 2;
+  const drawY = y + (h - drawH);
+
+  // тень
+  ctx.fillStyle = 'rgba(0,0,0,0.3)';
+  ctx.beginPath();
+  ctx.ellipse(x + w/2, y + h + 2, w * 0.45, 4, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // хвост
+  ctx.strokeStyle = '#e67e22';
+  ctx.lineWidth = 4;
+  ctx.lineCap = 'round';
+  const tailWave = Math.sin(time * 0.15) * 6;
+  ctx.beginPath();
+  ctx.moveTo(drawX + (player.facing > 0 ? 0 : drawW), drawY + drawH - 6);
+  ctx.quadraticCurveTo(
+    drawX + (player.facing > 0 ? -12 : drawW + 12),
+    drawY + drawH - 14 + tailWave,
+    drawX + (player.facing > 0 ? -8 : drawW + 8),
+    drawY + drawH - 24 + tailWave
+  );
+  ctx.stroke();
+
+  // тело
+  ctx.fillStyle = '#ff9f43';
+  ctx.fillRect(drawX, drawY, drawW, drawH);
+
+  // полоски
+  ctx.fillStyle = '#e67e22';
+  ctx.fillRect(drawX + 3, drawY + 10, 4, 10);
+  ctx.fillRect(drawX + drawW - 7, drawY + 10, 4, 10);
+  ctx.fillRect(drawX + 8, drawY + 14, 3, 6);
+
+  // голова
+  ctx.fillStyle = '#ff9f43';
+  ctx.fillRect(drawX + 1, drawY + 1, drawW - 2, 9);
+
+  // уши
+  ctx.beginPath();
+  ctx.moveTo(drawX + 2, drawY + 2);
+  ctx.lineTo(drawX + 7, drawY - 5);
+  ctx.lineTo(drawX + 11, drawY + 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(drawX + drawW - 11, drawY + 2);
+  ctx.lineTo(drawX + drawW - 7, drawY - 5);
+  ctx.lineTo(drawX + drawW - 2, drawY + 2);
+  ctx.fill();
+
+  // внутренние уши
+  ctx.fillStyle = '#ffb8c8';
+  ctx.beginPath();
+  ctx.moveTo(drawX + 4, drawY + 2);
+  ctx.lineTo(drawX + 7, drawY - 2);
+  ctx.lineTo(drawX + 9, drawY + 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(drawX + drawW - 9, drawY + 2);
+  ctx.lineTo(drawX + drawW - 7, drawY - 2);
+  ctx.lineTo(drawX + drawW - 4, drawY + 2);
+  ctx.fill();
+
+  // глаза
+  const eyeOff = player.facing * 1.5;
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(drawX + 6 + eyeOff, drawY + 5, 5, 5);
+  ctx.fillRect(drawX + drawW - 11 + eyeOff, drawY + 5, 5, 5);
+  ctx.fillStyle = '#1a1a2e';
+  ctx.fillRect(drawX + 7 + eyeOff, drawY + 6, 3, 3);
+  ctx.fillRect(drawX + drawW - 10 + eyeOff, drawY + 6, 3, 3);
+  // блики
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(drawX + 8 + eyeOff, drawY + 6, 1, 1);
+  ctx.fillRect(drawX + drawW - 9 + eyeOff, drawY + 6, 1, 1);
+
+  // нос и рот
+  ctx.fillStyle = '#ff6b81';
+  ctx.fillRect(drawX + drawW/2 - 2, drawY + 10, 4, 3);
+  ctx.strokeStyle = '#1a1a2e';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(drawX + drawW/2, drawY + 13);
+  ctx.lineTo(drawX + drawW/2 - 2, drawY + 15);
+  ctx.moveTo(drawX + drawW/2, drawY + 13);
+  ctx.lineTo(drawX + drawW/2 + 2, drawY + 15);
+  ctx.stroke();
+
+  // усы
+  ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+  ctx.beginPath();
+  ctx.moveTo(drawX + 4, drawY + 12); ctx.lineTo(drawX - 4, drawY + 11);
+  ctx.moveTo(drawX + 4, drawY + 14); ctx.lineTo(drawX - 4, drawY + 15);
+  ctx.moveTo(drawX + drawW - 4, drawY + 12); ctx.lineTo(drawX + drawW + 4, drawY + 11);
+  ctx.moveTo(drawX + drawW - 4, drawY + 14); ctx.lineTo(drawX + drawW + 4, drawY + 15);
+  ctx.stroke();
+
+  // лапки при ходьбе
+  if (player.onGround && Math.abs(player.vx) > 0.5) {
+    const legPhase = Math.sin(player.animTimer * 0.3) * 2;
+    ctx.fillStyle = '#e67e22';
+    ctx.fillRect(drawX + 3, drawY + drawH - 2 + legPhase, 4, 4);
+    ctx.fillRect(drawX + drawW - 7, drawY + drawH - 2 - legPhase, 4, 4);
+  }
+}
+
+function drawDog(e) {
+  const {x, y, w, h} = e;
+  // тень
+  ctx.fillStyle = 'rgba(0,0,0,0.25)';
+  ctx.beginPath();
+  ctx.ellipse(x + w/2, y + h + 2, w * 0.4, 3, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // тело
+  ctx.fillStyle = '#6b3410';
+  ctx.fillRect(x, y + 4, w, h - 4);
+  // голова
+  ctx.fillStyle = '#8b4513';
+  ctx.fillRect(x + (e.dir > 0 ? w - 12 : 0), y, 14, 12);
+  // уши
+  ctx.fillStyle = '#5c2e0c';
+  ctx.fillRect(x + (e.dir > 0 ? w - 10 : 2), y - 2, 4, 6);
+  // хвост
+  ctx.fillStyle = '#5c2e0c';
+  const tailWag = Math.sin(e.t * 2) * 3;
+  ctx.fillRect(x + (e.dir > 0 ? -2 : w), y + 8 + tailWag, 4, 8);
+  // глаза
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(x + (e.dir > 0 ? w - 8 : 4), y + 4, 4, 4);
+  ctx.fillStyle = '#000';
+  ctx.fillRect(x + (e.dir > 0 ? w - 7 : 5), y + 5, 2, 2);
+  // оскал
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(x + (e.dir > 0 ? w - 9 : 2), y + 9, 6, 2);
+  // лапы
+  const legPhase = Math.sin(e.t * 1.5) * 2;
+  ctx.fillStyle = '#5c2e0c';
+  ctx.fillRect(x + 2, y + h - 2 + legPhase, 4, 3);
+  ctx.fillRect(x + w - 6, y + h - 2 - legPhase, 4, 3);
+}
+
+function drawBee(e) {
+  const {x, y, w, h} = e;
+  // крылья с махом
+  const wingPhase = Math.sin(e.t * 4) * 3;
+  ctx.fillStyle = 'rgba(255,255,255,0.7)';
+  ctx.beginPath();
+  ctx.ellipse(x + w/2 - 4, y - 2 + wingPhase, 6, 4, -0.3, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(x + w/2 + 4, y - 2 - wingPhase, 6, 4, 0.3, 0, Math.PI * 2);
+  ctx.fill();
+  // тело
+  ctx.fillStyle = '#ffd93d';
+  ctx.beginPath();
+  ctx.ellipse(x + w/2, y + h/2, w/2, h/2, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // полоски
+  ctx.fillStyle = '#1a1a2e';
+  ctx.fillRect(x + w/2 - 2, y + 3, 4, h - 6);
+  ctx.fillRect(x + 3, y + h/2 - 1, w - 6, 3);
+  // глаза
+  ctx.fillStyle = '#000';
+  ctx.fillRect(x + (e.dir > 0 ? w - 7 : 4), y + h/2 - 3, 3, 3);
+  // жало
+  ctx.fillStyle = '#1a1a2e';
+  ctx.beginPath();
+  ctx.moveTo(x + (e.dir > 0 ? 0 : w), y + h/2);
+  ctx.lineTo(x + (e.dir > 0 ? -4 : w + 4), y + h/2);
+  ctx.lineTo(x + (e.dir > 0 ? 0 : w), y + h/2 + 3);
+  ctx.fill();
+}
+
+function drawEnemies() {
+  for (const e of enemies) {
+    if (e.type === 'dog') drawDog(e);
+    else drawBee(e);
+  }
+}
+
+function drawFish(x, y, oy) {
+  // тело
+  ctx.fillStyle = '#4fc3f7';
+  ctx.beginPath();
+  ctx.ellipse(x + 11, y + 11 + oy, 11, 7, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // хвост
+  ctx.beginPath();
+  ctx.moveTo(x + 20, y + 11 + oy);
+  ctx.lineTo(x + 28, y + 4 + oy);
+  ctx.lineTo(x + 28, y + 18 + oy);
+  ctx.closePath();
+  ctx.fill();
+  // плавник
+  ctx.fillStyle = '#29a8d8';
+  ctx.beginPath();
+  ctx.ellipse(x + 11, y + 6 + oy, 6, 3, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // глаз
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.arc(x + 6, y + 9 + oy, 2.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#000';
+  ctx.beginPath();
+  ctx.arc(x + 6, y + 9 + oy, 1.5, 0, Math.PI * 2);
+  ctx.fill();
+  // чешуя
+  ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+  ctx.lineWidth = 1;
+  for (let i = 0; i < 3; i++) {
+    ctx.beginPath();
+    ctx.arc(x + 10 + i * 4, y + 11 + oy, 3, 0.3, Math.PI - 0.3);
+    ctx.stroke();
+  }
+}
+
+function drawMilk(x, y, oy) {
+  // пакет
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(x + 3, y + 4 + oy, 16, 20);
+  // верх
+  ctx.fillStyle = '#4fc3f7';
+  ctx.fillRect(x + 3, y + 4 + oy, 16, 5);
+  // блик
+  ctx.fillStyle = 'rgba(255,255,255,0.9)';
+  ctx.fillRect(x + 5, y + 10 + oy, 2, 12);
+  // буква М
+  ctx.fillStyle = '#1a1a2e';
+  ctx.font = 'bold 11px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('M', x + 11, y + 19 + oy);
+  ctx.textAlign = 'left';
+}
+
+function drawItems() {
+  for (const it of items) {
+    if (it.taken) continue;
+    const oy = Math.sin(it.bob) * 3;
+    // свечение
+    const g = ctx.createRadialGradient(it.x + 11, it.y + 11 + oy, 0, it.x + 11, it.y + 11 + oy, 20);
+    g.addColorStop(0, it.type === 'fish' ? 'rgba(79,195,247,0.3)' : 'rgba(255,255,255,0.3)');
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(it.x - 10, it.y - 10 + oy, 42, 42);
+    if (it.type === 'fish') drawFish(it.x, it.y, oy);
+    else drawMilk(it.x, it.y, oy);
+  }
+}
+
+function drawFinish() {
+  const f = finish;
+  // свечение
+  const g = ctx.createRadialGradient(f.x + f.w/2, f.y + f.h/2, 0, f.x + f.w/2, f.y + f.h/2, 60);
+  g.addColorStop(0, 'rgba(46,204,113,0.3)');
+  g.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(f.x - 60, f.y - 60, f.w + 120, f.h + 120);
+
+  // крыша
+  ctx.fillStyle = '#c0392b';
+  ctx.beginPath();
+  ctx.moveTo(f.x - 12, f.y);
+  ctx.lineTo(f.x + f.w / 2, f.y - 28);
+  ctx.lineTo(f.x + f.w + 12, f.y);
+  ctx.closePath();
+  ctx.fill();
+  // стены
+  ctx.fillStyle = '#f39c12';
+  ctx.fillRect(f.x, f.y, f.w, f.h);
+  // окна
+  ctx.fillStyle = '#ffe680';
+  ctx.fillRect(f.x + 4, f.y + 6, 8, 8);
+  ctx.fillRect(f.x + f.w - 12, f.y + 6, 8, 8);
+  ctx.strokeStyle = '#8b4513';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(f.x + 4, f.y + 6, 8, 8);
+  ctx.strokeRect(f.x + f.w - 12, f.y + 6, 8, 8);
+  // дверь
+  ctx.fillStyle = '#8b4513';
+  ctx.fillRect(f.x + 9, f.y + f.h - 20, 12, 20);
+  ctx.fillStyle = '#ffd166';
+  ctx.fillRect(f.x + 18, f.y + f.h - 11, 2, 2);
+  // флаг
+  ctx.strokeStyle = '#7f8c8d';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(f.x + f.w - 2, f.y - 42);
+  ctx.lineTo(f.x + f.w - 2, f.y - 30);
+  ctx.stroke();
+  ctx.fillStyle = '#2ecc71';
+  ctx.beginPath();
+  ctx.moveTo(f.x + f.w - 2, f.y - 42);
+  ctx.lineTo(f.x + f.w + 18, f.y - 37);
+  ctx.lineTo(f.x + f.w - 2, f.y - 32);
+  ctx.closePath();
+  ctx.fill();
+}
+
+function drawParticles() {
+  for (const p of particles) {
+    ctx.globalAlpha = p.life / p.maxLife;
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x - p.size/2, p.y - p.size/2, p.size, p.size);
+  }
+  ctx.globalAlpha = 1;
+}
+
+// ================== ГЛАВНЫЙ ЦИКЛ ==================
+function loop() {
+  time++;
+  if (screenShake > 0) screenShake--;
+
+  if (state === 'playing') {
+    updatePlayer();
+    updateEnemies();
+    updateItems();
+    checkFinish();
+    if (player.invuln > 0) player.invuln--;
+    updateHUD();
+  }
+  updateParticles();
+
+  // камера следует за игроком
+  const targetCamX = Math.max(0, Math.min(W - W, player.x - W/2));
+  camera.x += (targetCamX - camera.x) * 0.1;
+
+  // экранная тряска
+  ctx.save();
+  if (screenShake > 0) {
+    const sx = (Math.random() - 0.5) * screenShake;
+    const sy = (Math.random() - 0.5) * screenShake;
+    ctx.translate(sx, sy);
+  }
+
+  drawBackground();
+  drawPlatforms();
+  drawFinish();
+  drawItems();
+  drawEnemies();
+  drawPlayer();
+  drawParticles();
+
+  ctx.restore();
+
+  requestAnimationFrame(loop);
+}
+
+// ================== СТАРТ ==================
+showOverlay(
+  '🐱 Пиксельный Кот 🐱',
+  'Помоги Барсику пройти 5 локаций и вернуться домой!',
+  'Начать игру',
+  () => {
+    initAudio();
+    overlay.classList.remove('show');
+    restart();
+  }
+);
+loadLevel(0);
+state = 'menu';
+loop();
+</script>
+</body>
+</html>
